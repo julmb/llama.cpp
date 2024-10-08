@@ -2737,6 +2737,8 @@ struct llama_ubatch {
 };
 
 struct llama_kv_cell {
+    llama_token token = 0;
+
     llama_pos pos   = -1;
     llama_pos delta = 0;
     int32_t   src   = -1; // used by recurrent state models to copy states
@@ -3869,6 +3871,7 @@ static bool llama_kv_cache_find_slot(
     for (uint32_t s = 0; s < n_seqs; s++) {
         for (uint32_t i = 0; i < n_seq_tokens; ++i) {
             uint32_t k = s*n_seq_tokens + i;
+            cache.cells[cache.head + k].token = batch.token[k];
             cache.cells[cache.head + k].pos = batch.pos[k];
 
             for (int32_t j = 0; j < batch.n_seq_id[s]; j++) {
@@ -20016,6 +20019,18 @@ int32_t llama_get_kv_cache_token_count(const struct llama_context * ctx) {
 
 int32_t llama_get_kv_cache_used_cells(const struct llama_context * ctx) {
     return ctx->kv_self.used;
+}
+
+int32_t llama_get_kv_cache_tokens(struct llama_context * ctx, llama_seq_id seq_id, llama_token * tokens, int32_t capacity) {
+    int count = 0;
+
+    for (uint32_t i = 0; i < ctx->kv_self.size; i++)
+        if (ctx->kv_self.cells[i].has_seq_id(seq_id)) {
+            if (count < capacity) tokens[count] = ctx->kv_self.cells[i].token;
+            count++;
+        }
+
+    return count;
 }
 
 void llama_kv_cache_clear(struct llama_context * ctx) {

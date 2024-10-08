@@ -602,6 +602,8 @@ extern "C" {
     // Returns the number of used KV cells (i.e. have at least one sequence assigned to them)
     LLAMA_API int32_t llama_get_kv_cache_used_cells(const struct llama_context * ctx);
 
+    LLAMA_API int32_t llama_get_kv_cache_tokens(struct llama_context * ctx, llama_seq_id seq_id, llama_token * tokens, int32_t capacity);
+
     // Clear the KV cache - both cell info is erased and KV data is zeroed
     LLAMA_API void llama_kv_cache_clear(
             struct llama_context * ctx);
