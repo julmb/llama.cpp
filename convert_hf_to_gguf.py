@@ -72,7 +72,8 @@ class Model:
     def __init__(self, dir_model: Path, ftype: gguf.LlamaFileType, fname_out: Path, is_big_endian: bool = False,
                  use_temp_file: bool = False, eager: bool = False,
                  metadata_override: Path | None = None, model_name: str | None = None,
-                 split_max_tensors: int = 0, split_max_size: int = 0, dry_run: bool = False, small_first_shard: bool = False):
+                 split_max_tensors: int = 0, split_max_size: int = 0, dry_run: bool = False,
+                 small_first_shard: bool = False, hparams: dict[str, Any] | None = None):
         if type(self) is Model:
             raise TypeError(f"{type(self).__name__!r} should not be directly instantiated")
 
@@ -87,7 +88,7 @@ class Model:
         self.is_safetensors = len(self.part_names) > 0
         if not self.is_safetensors:
             self.part_names = Model.get_model_part_names(self.dir_model, "pytorch_model", ".bin")
-        self.hparams = Model.load_hparams(self.dir_model)
+        self.hparams = Model.load_hparams(self.dir_model) if hparams is None else hparams
         self.block_count = self.find_hparam(["n_layers", "num_hidden_layers", "n_layer", "num_layers"])
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
         self.tensor_names = None
@@ -524,6 +525,9 @@ class Model:
             else:
                 token: str = reverse_vocab[i]
                 if token in added_vocab:
+                    # We need to manually encode and decode the added tokens in case special characters
+                    # used for `\n` / `\t` have been manually added in the added tokens
+                    token = tokenizer.decode(tokenizer.encode(token))
                     if tokenizer.added_tokens_decoder[i].special or self.does_token_look_special(token):
                         toktypes.append(gguf.TokenType.CONTROL)
                     else:
@@ -570,9 +574,15 @@ class Model:
         if chkhsh == "8aeee3860c56296a157a1fe2fad249ec40aa59b1bb5709f4ade11c4e6fe652ed":
             # ref: https://huggingface.co/tiiuae/falcon-7b
             res = "falcon"
+        if chkhsh == "9d032fcbd5501f4a38150912590928bfb36091efb5df11b8e2124b0390e3fb1e":
+            # ref: https://huggingface.co/tiiuae/Falcon3-7B-Base
+            res = "falcon3"
         if chkhsh == "0876d13b50744004aa9aeae05e7b0647eac9d801b5ba4668afc01e709c15e19f":
             # ref: https://huggingface.co/BAAI/bge-small-en-v1.5
             res = "bert-bge"
+        if chkhsh == "8e62295832751ca1e8f92f2226f403dea30dc5165e448b5bfa05af5340c64ec7":
+            # ref: https://huggingface.co/BAAI/bge-large-zh-v1.5
+            res = "bert-bge-large"
         if chkhsh == "b6dc8df998e1cfbdc4eac8243701a65afe638679230920b50d6f17d81c098166":
             # ref: https://huggingface.co/mosaicml/mpt-7b
             res = "mpt"
@@ -654,6 +664,15 @@ class Model:
         if chkhsh == "60824e3c0d9401f89943cbb2fff727f0e2d4c545ba4df2d6e4f09a6db0f5b450":
             # ref: https://huggingface.co/facebook/chameleon-7b
             res = "chameleon"
+        if chkhsh == "1431a23e583c97432bc230bff598d103ddb5a1f89960c8f1d1051aaa944d0b35":
+            # ref: https://huggingface.co/sapienzanlp/Minerva-7B-base-v1.0
+            res = "minerva-7b"
+        if chkhsh == "8b5a93ed704057481f240da0be7e7dca721d7f8f4755263b6807227a2cbeae65":
+            # ref: https://huggingface.co/sentence-transformers/stsb-roberta-base
+            res = "roberta-bpe"
+        if chkhsh == "ad851be1dba641f2e3711822f816db2c265f788b37c63b4e1aeacb9ee92de8eb":
+            # ref: https://huggingface.co/ai-sage/GigaChat-20B-A3B-instruct
+            res = "gigachat"
 
         if res is None:
             logger.warning("\n")
@@ -1538,6 +1557,17 @@ class LlamaModel(Model):
             special_vocab._set_special_token("eot",    32010)
             special_vocab.add_to_gguf(self.gguf_writer)
 
+        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
+        if tokenizer_config_file.is_file():
+            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
+                tokenizer_config_json = json.load(f)
+                if "add_prefix_space" in tokenizer_config_json:
+                    self.gguf_writer.add_add_space_prefix(tokenizer_config_json["add_prefix_space"])
+
+        # Apply to granite small models only
+        if self.hparams.get("vocab_size", 32000) == 49152:
+            self.gguf_writer.add_add_bos_token(False)
+
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
         hparams = self.hparams
@@ -1553,17 +1583,6 @@ class LlamaModel(Model):
             if self.hparams["rope_scaling"].get("type") == "linear":
                 self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
                 self.gguf_writer.add_rope_scaling_factor(self.hparams["rope_scaling"]["factor"])
-
-        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
-        if tokenizer_config_file.is_file():
-            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
-                tokenizer_config_json = json.load(f)
-                if "add_prefix_space" in tokenizer_config_json:
-                    self.gguf_writer.add_add_space_prefix(tokenizer_config_json["add_prefix_space"])
-
-        # Apply to granite small models only
-        if self.hparams.get("vocab_size", 32000) == 49152:
-            self.gguf_writer.add_add_bos_token(False)
 
     @staticmethod
     def permute(weights: Tensor, n_head: int, n_head_kv: int | None):
@@ -1827,29 +1846,40 @@ class MiniCPMModel(Model):
     model_arch = gguf.MODEL_ARCH.MINICPM
 
     def set_gguf_parameters(self):
-        block_count = self.hparams["num_hidden_layers"]
-        self.gguf_writer.add_context_length(self.hparams["max_position_embeddings"])
-        self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
-        self.gguf_writer.add_block_count(block_count)
-        self.gguf_writer.add_feed_forward_length(self.hparams["intermediate_size"])
-        self.gguf_writer.add_rope_dimension_count(self.hparams["hidden_size"] // self.hparams["num_attention_heads"])
-        self.gguf_writer.add_head_count(self.hparams["num_attention_heads"])
-        self.gguf_writer.add_head_count_kv(self.hparams["num_key_value_heads"])
-        self.gguf_writer.add_layer_norm_rms_eps(self.hparams["rms_norm_eps"])
-        self.gguf_writer.add_file_type(self.ftype)
+        super().set_gguf_parameters()
+        embedding_scale = float(self.hparams["scale_emb"])
+        self.gguf_writer.add_embedding_scale(embedding_scale)
+        logger.info(f"gguf: (minicpm) embedding_scale = {embedding_scale}")
+        residual_scale = self.hparams["scale_depth"] / self.hparams["num_hidden_layers"] ** 0.5
+        self.gguf_writer.add_residual_scale(residual_scale)
+        logger.info(f"gguf: (minicpm) residual_scale = {residual_scale}")
+        logit_scale = self.hparams["hidden_size"] / self.hparams["dim_model_base"]
+        self.gguf_writer.add_logit_scale(logit_scale)
+        logger.info(f"gguf: (minicpm) logit_scale = {logit_scale}")
+        if self.hparams.get("rope_scaling") is not None:
+            if self.hparams["rope_scaling"].get("type") == "longrope":
+                self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LONGROPE)
+                logger.info(f"gguf: (minicpm) rope_scaling_type = {gguf.RopeScalingType.LONGROPE}")
+
+    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+        rope_dims = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
+
+        rope_scaling = self.find_hparam(['rope_scaling'], True)
+        if rope_scaling is not None:
+            long_factors = rope_scaling.get('long_factor', None)
+            short_factors = rope_scaling.get('short_factor', None)
+
+            if long_factors is None or short_factors is None:
+                raise KeyError('Missing the required key rope_scaling.long_factor or rope_scaling_short_factor')
+
+            if len(long_factors) != len(short_factors) or len(long_factors) != rope_dims / 2:
+                raise ValueError(f'The length of rope long and short factors must be {rope_dims / 2}')
+
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FACTORS_LONG), torch.tensor(long_factors, dtype=torch.float32))
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FACTORS_SHORT), torch.tensor(short_factors, dtype=torch.float32))
 
     def set_vocab(self):
-        self._set_vocab_llama_hf()
-
-    def _reverse_hf_permute(self, weights: Tensor, n_head: int, n_kv_head: int | None = None) -> Tensor:
-        if n_kv_head is not None and n_head != n_kv_head:
-            n_head //= n_kv_head
-
-        return (
-            weights.reshape(n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:])
-            .swapaxes(1, 2)
-            .reshape(weights.shape)
-        )
+        self._set_vocab_sentencepiece()
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         del bid  # unused
@@ -1859,9 +1889,9 @@ class MiniCPMModel(Model):
 
         # HF models permute some of the tensors, so we need to undo that
         if name.endswith(("q_proj.weight")):
-            data_torch = self._reverse_hf_permute(data_torch, n_head, n_head)
+            data_torch = LlamaModel.permute(data_torch, n_head, n_head)
         if name.endswith(("k_proj.weight")):
-            data_torch = self._reverse_hf_permute(data_torch, n_head, n_kv_head)
+            data_torch = LlamaModel.permute(data_torch, n_head, n_kv_head)
 
         return [(self.map_tensor_name(name), data_torch)]
 
@@ -1970,6 +2000,37 @@ class Qwen2Model(Model):
             self._set_vocab_sentencepiece()
         except FileNotFoundError:
             self._set_vocab_gpt2()
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        if self.hparams.get("rope_scaling") is not None and "factor" in self.hparams["rope_scaling"]:
+            if self.hparams["rope_scaling"].get("type") == "yarn":
+                self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
+                self.gguf_writer.add_rope_scaling_factor(self.hparams["rope_scaling"]["factor"])
+                self.gguf_writer.add_rope_scaling_orig_ctx_len(self.hparams["rope_scaling"]["original_max_position_embeddings"])
+
+
+@Model.register("Qwen2VLForConditionalGeneration")
+class Qwen2VLModel(Model):
+    model_arch = gguf.MODEL_ARCH.QWEN2VL
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        mrope_section = self.hparams["rope_scaling"]["mrope_section"]
+        mrope_section += [0] * max(0, 4 - len(mrope_section))
+        self.gguf_writer.add_rope_dimension_sections(mrope_section)
+
+    def set_vocab(self):
+        try:
+            self._set_vocab_sentencepiece()
+        except FileNotFoundError:
+            self._set_vocab_gpt2()
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        for name, data in super().get_tensors():
+            if name.startswith("visual."):
+                continue
+            yield name, data
 
 
 @Model.register("Qwen2MoeForCausalLM")
@@ -2515,7 +2576,7 @@ class InternLM2Model(Model):
             return [(self.map_tensor_name(name), data_torch)]
 
 
-@Model.register("BertModel", "CamembertModel")
+@Model.register("BertModel", "CamembertModel", "RobertaModel")
 class BertModel(Model):
     model_arch = gguf.MODEL_ARCH.BERT
 
@@ -2556,7 +2617,8 @@ class BertModel(Model):
 
         # we need this to validate the size of the token_type embeddings
         # though currently we are passing all zeros to the token_type embeddings
-        self.gguf_writer.add_token_type_count(2)  # "Sequence A" or "Sequence B"
+        # "Sequence A" or "Sequence B"
+        self.gguf_writer.add_token_type_count(self.hparams.get("type_vocab_size", 1))
 
         # convert to phantom space vocab
         def phantom(tok):
@@ -2703,7 +2765,7 @@ class XLMRobertaModel(BertModel):
         self.gguf_writer.add_token_scores(scores)
         self.gguf_writer.add_token_types(toktypes)
         self.gguf_writer.add_add_space_prefix(add_prefix)
-        self.gguf_writer.add_token_type_count(1)
+        self.gguf_writer.add_token_type_count(self.hparams.get("type_vocab_size", 1))
         self.gguf_writer.add_remove_extra_whitespaces(remove_whitespaces)
         if precompiled_charsmap:
             self.gguf_writer.add_precompiled_charsmap(precompiled_charsmap)
@@ -2864,6 +2926,9 @@ class Rwkv6Model(Model):
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_types(toktypes)
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
+        special_vocab.chat_template = "rwkv-world"
+        # hack: Add '\n\n' as the EOT token to make it chat normally
+        special_vocab._set_special_token("eot", 261)
         special_vocab.add_to_gguf(self.gguf_writer)
 
     def set_gguf_parameters(self):
@@ -3031,6 +3096,11 @@ class OlmoModel(Model):
             data_torch = LlamaModel.permute(data_torch, n_head, n_kv_head)
 
         return [(self.map_tensor_name(name), data_torch)]
+
+
+@Model.register("Olmo2ForCausalLM")
+class Olmo2Model(Model):
+    model_arch = gguf.MODEL_ARCH.OLMO2
 
 
 @Model.register("OlmoeForCausalLM")
@@ -3346,6 +3416,97 @@ class ArcticModel(Model):
                     data_torch = torch.stack(datas, dim=0)
 
                     merged_name = f"layers.{bid}.feed_forward.experts.{wid}.weight"
+
+                    new_name = self.map_tensor_name(merged_name)
+
+                    tensors.append((new_name, data_torch))
+                return tensors
+            else:
+                return []
+
+        return [(self.map_tensor_name(name), data_torch)]
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+
+        if self._experts is not None:
+            # flatten `list[dict[str, Tensor]]` into `list[str]`
+            experts = [k for d in self._experts for k in d.keys()]
+            if len(experts) > 0:
+                raise ValueError(f"Unprocessed experts: {experts}")
+
+
+@Model.register("DeepseekForCausalLM")
+class DeepseekModel(Model):
+    model_arch = gguf.MODEL_ARCH.DEEPSEEK
+
+    def set_vocab(self):
+        try:
+            self._set_vocab_sentencepiece()
+        except FileNotFoundError:
+            self._set_vocab_gpt2()
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        hparams = self.hparams
+        if "head_dim" in hparams:
+            rope_dim = hparams["head_dim"]
+        else:
+            rope_dim = hparams["hidden_size"] // hparams["num_attention_heads"]
+
+        self.gguf_writer.add_rope_dimension_count(rope_dim)
+        self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
+        self.gguf_writer.add_leading_dense_block_count(hparams["first_k_dense_replace"])
+        self.gguf_writer.add_vocab_size(hparams["vocab_size"])
+        self.gguf_writer.add_expert_feed_forward_length(hparams["moe_intermediate_size"])
+        self.gguf_writer.add_expert_weights_scale(1.0)
+        self.gguf_writer.add_expert_count(hparams["n_routed_experts"])
+        self.gguf_writer.add_expert_shared_count(hparams["n_shared_experts"])
+
+    _experts: list[dict[str, Tensor]] | None = None
+
+    @staticmethod
+    def permute(weights: Tensor, n_head: int, n_head_kv: int | None):
+        if n_head_kv is not None and n_head != n_head_kv:
+            n_head = n_head_kv
+        return (weights.reshape(n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:])
+                .swapaxes(1, 2)
+                .reshape(weights.shape))
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        n_head = self.hparams["num_attention_heads"]
+        n_kv_head = self.hparams.get("num_key_value_heads")
+
+        if name.endswith(("q_proj.weight", "q_proj.bias")):
+            data_torch = DeepseekModel.permute(data_torch, n_head, n_head)
+        if name.endswith(("k_proj.weight", "k_proj.bias")):
+            data_torch = DeepseekModel.permute(data_torch, n_head, n_kv_head)
+
+        # process the experts separately
+        if name.find("mlp.experts") != -1:
+            n_experts = self.hparams["n_routed_experts"]
+            assert bid is not None
+
+            if self._experts is None:
+                self._experts = [{} for _ in range(self.block_count)]
+
+            self._experts[bid][name] = data_torch
+
+            if len(self._experts[bid]) >= n_experts * 3:
+                tensors: list[tuple[str, Tensor]] = []
+
+                # merge the experts into a single 3d tensor
+                for w_name in ["down_proj", "gate_proj", "up_proj"]:
+                    datas: list[Tensor] = []
+
+                    for xid in range(n_experts):
+                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
+                        datas.append(self._experts[bid][ename])
+                        del self._experts[bid][ename]
+
+                    data_torch = torch.stack(datas, dim=0)
+
+                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
 
                     new_name = self.map_tensor_name(merged_name)
 
@@ -3741,10 +3902,7 @@ class JaisModel(Model):
 
         # Embeddings scale
         self.embeddings_scale = 1.0
-        # note: For some JAIS flavors, output is tied to (same as) wte in original model
-        self.output_is_wte = False
         if 'mup_embeddings_scale' in self.hparams:
-            self.output_is_wte = True   # Hack (?)
             self.embeddings_scale = self.hparams['mup_embeddings_scale']
         elif 'embeddings_scale' in self.hparams:
             self.embeddings_scale = self.hparams['embeddings_scale']
@@ -3801,10 +3959,7 @@ class JaisModel(Model):
 
         if new_name == self.format_tensor_name(gguf.MODEL_TENSOR.TOKEN_EMBD):
             tensors.append((new_name, data_torch * self.embeddings_scale))
-            if self.output_is_wte:
-                tensors.append((self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT), data_torch * self.width_scale))
         elif new_name == self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT):
-            assert not self.output_is_wte
             tensors.append((new_name, data_torch * self.width_scale))
         else:
             tensors.append((new_name, data_torch))

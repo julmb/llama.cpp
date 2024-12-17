@@ -46,7 +46,6 @@ actor LlamaContext {
         let sparams = llama_sampler_chain_default_params()
         self.sampling = llama_sampler_chain_init(sparams)
         llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
-        llama_sampler_chain_add(self.sampling, llama_sampler_init_softmax())
         llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
     }
 
@@ -211,20 +210,20 @@ actor LlamaContext {
 
             llama_kv_cache_clear(context)
 
-            let t_pp_start = ggml_time_us()
+            let t_pp_start = DispatchTime.now().uptimeNanoseconds / 1000;
 
             if llama_decode(context, batch) != 0 {
                 print("llama_decode() failed during prompt")
             }
             llama_synchronize(context)
 
-            let t_pp_end = ggml_time_us()
+            let t_pp_end = DispatchTime.now().uptimeNanoseconds / 1000;
 
             // bench text generation
 
             llama_kv_cache_clear(context)
 
-            let t_tg_start = ggml_time_us()
+            let t_tg_start = DispatchTime.now().uptimeNanoseconds / 1000;
 
             for i in 0..<tg {
                 llama_batch_clear(&batch)
@@ -239,7 +238,7 @@ actor LlamaContext {
                 llama_synchronize(context)
             }
 
-            let t_tg_end = ggml_time_us()
+            let t_tg_end = DispatchTime.now().uptimeNanoseconds / 1000;
 
             llama_kv_cache_clear(context)
 
